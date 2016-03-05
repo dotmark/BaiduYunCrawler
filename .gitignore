@@ -1,6 +1,8 @@
 # Windows image file caches
 Thumbs.db
 ehthumbs.db
+*.pyc
+*.~py
 
 # Folder config file
 Desktop.ini
@@ -16,6 +18,7 @@ $RECYCLE.BIN/
 
 # Windows shortcuts
 *.lnk
+
 
 # =========================
 # Operating System Files

@@ -22,8 +22,8 @@ MONGODB_SHARE = MONGODB.baidu.share
 
 ALL_ERROR = Exception
 
-HTTP_ERROR_MAX = 5
-HTTP_TIME_OUT = 20
+HTTP_ERROR_MAX = 50
+HTTP_TIME_OUT = 30
 USER_AGENT = (
     'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) '
     'Chrome/31.0.1650.63 Safari/537.36'
@@ -35,10 +35,10 @@ def getUrl(url, use_gzip=True, timeout=HTTP_TIME_OUT, proxy_info=None):
         return '', None
 
     if proxy_info:
-        getUrl.proxy_info = proxy_info
         proxy_support = urllib2.ProxyHandler({"http" : "http://%s" % proxy_info})
         opener = urllib2.build_opener(proxy_support)
         urllib2.install_opener(opener)
+        getUrl.proxy_info = proxy_info
 
     req = urllib2.Request(url)
     if use_gzip:
@@ -54,19 +54,17 @@ def getUrl(url, use_gzip=True, timeout=HTTP_TIME_OUT, proxy_info=None):
             raise ex
         except ALL_ERROR:
             if use_gzip:
-                return getUrl(url, use_gzip=False, timeout=timeout)
+                return getUrl(url, use_gzip=False, timeout=timeout, proxy_info=proxy_info)
     return data, headers
 
 def get_proxy_info():
     proxy_list = getattr(get_proxy_info, 'proxy_list', None)
     if proxy_list is None and os.path.isfile(os.path.join(os.getcwd(), 'ip.txt')):
         with open('ip.txt', 'r') as rf:
-            proxy_list = [item.split('@', 1)[0].strip() for item in rf if item.strip()]
-            proxy_list = [i for i in proxy_list if ':' in i]
+            proxy_list = [i.replace('\n', '') for i in rf if ':' in i]
         get_proxy_info.proxy_list = proxy_list
     if proxy_list:
-        index = random.randint(0, len(proxy_list)-1)
-        return proxy_list[index]
+        return random.choice(proxy_list)
     return None
 
 def get_data(uk_in, url, ret_func, isok_func, error_count_max=HTTP_ERROR_MAX):
@@ -74,21 +72,16 @@ def get_data(uk_in, url, ret_func, isok_func, error_count_max=HTTP_ERROR_MAX):
 
     error_count = 0
     proxy_info = None
-    while not isok_func(ret):
-        if error_count>=error_count_max:
-            _LOG('failure in get_data:%d<%s>' % (uk_in, url))
-            errno = ret.get('errno', -998) if isinstance(ret, dict) else -999
-            errno = errno if errno<0 else -997
-            MONGODB_FANS.update_one({'uk':uk_in}, {'$set': {'done':errno}}, upsert=False)
-            return None
-
-        if ret:
+    while 1:
+        if ret is None:
             proxy_info = get_proxy_info()
-            if not proxy_info:
-                time.sleep(random.randint(30, 90))
-            _LOG('%d use proxy_info:<%s>' % (uk_in, proxy_info))
-            _LOG('%s%s' % ('.'*(error_count+1), url))
+            #_LOG('%d use proxy_info:<%s>' % (uk_in, proxy_info))
+            #_LOG('%s%s' % ('.'*(error_count+1), url))
             error_count += 1
+            if error_count>=error_count_max:
+                _LOG('failure in:%d<%s>(%s)' % (uk_in, url, proxy_info))
+                return {}
+
         try:
             data, headers = getUrl(url, proxy_info=proxy_info)
             ret = ret_func(data, headers)
@@ -96,10 +89,13 @@ def get_data(uk_in, url, ret_func, isok_func, error_count_max=HTTP_ERROR_MAX):
             _LOG('KeyboardInterrupt.')
             raise ex1
         except ALL_ERROR as ex2:
-            ret = {'error':ex2, 'proxy_info':getattr(getUrl, 'proxy_info', '')}
-            _LOG('ALL_ERROR:%r <%s>' % (ret['error'], ret['proxy_info']))
+            proxy_info = getattr(getUrl, 'proxy_info', '')
+            _LOG('ALL_ERROR:%r <%s>' % (ex2.__class__, proxy_info))
 
-    return ret
+        if isok_func(ret):
+            return ret
+        else:
+            ret = None
 
 def get_follow(uk_in):
     ret_func = lambda data, headers: json.loads(data)
@@ -109,24 +105,22 @@ def get_follow(uk_in):
     index = 0
     limit = '&limit=24&start=%d' % (index)
     ret = get_data(uk_in, url+limit, ret_func=ret_func, isok_func=isok_func)
-    uk_dict = {i['follow_uk']:i for i in ret['follow_list']}
-    total_count = ret['total_count']
+    uk_dict = {i['follow_uk']:i for i in ret['follow_list']} if isok_func(ret) else {}
+    total_count = ret.get('total_count', 0)
 
     while total_count>24:
         index += 24
         limit = '&limit=24&start=%d' % (index)
         ret = get_data(uk_in, url+limit, ret_func=ret_func, isok_func=isok_func)
-        if not ret:
-            break
-        uk_dict.update({i['follow_uk']:i for i in ret['follow_list']})
+        uk_dict.update({i['follow_uk']:i for i in ret['follow_list']} if isok_func(ret) else {})
         total_count -= 24
     return uk_dict
 
 def do_uk_follow(uk_in, num):
-    _LOG('get uk_follow:%d <%d>' % (uk_in, num))
+    #_LOG('get uk_follow:%d <%d>' % (uk_in, num))
     uk_follow = get_follow(uk_in)
     follow_len = len(uk_follow)
-    _LOG('save uk_follow:%d <%d>' % (uk_in, follow_len))
+    #_LOG('save uk_follow:%d <%d>' % (uk_in, follow_len))
 
     error = 0
     for uk, item in uk_follow.items():
@@ -141,7 +135,7 @@ def do_uk_follow(uk_in, num):
             #_LOG('MONGODB_FANS.insert_one:%d -> %s' % (uk_in, ex) )
 
     MONGODB_FANS.update_one({'uk':uk_in}, {'$set': {'follow_flag':1}}, upsert=False)
-    _LOG('follow_flag:%d(%d) <duplicate key:%d(%d)>' % (uk_in, num, error, follow_len))
+    _LOG('set follow_flag:%d(%d) <duplicate key:%d(%d)>' % (uk_in, num, error, follow_len))
 
 
 def get_fans(uk_in):
@@ -152,14 +146,14 @@ def get_fans(uk_in):
     index = 0
     limit = '&limit=24&start=%d' % (index)
     ret = get_data(uk_in, url+limit, ret_func=ret_func, isok_func=isok_func)
-    uk_dict = {i['fans_uk']:i for i in ret.get('fans_list', [])}
-    total_count = ret['total_count']
+    uk_dict = {i['fans_uk']:i for i in ret.get('fans_list', [])} if isok_func(ret) else {}
+    total_count = ret.get('total_count', 0)
 
     while total_count>24:
         index += 24
         limit = '&limit=24&start=%d' % (index)
         ret = get_data(uk_in, url+limit, ret_func=ret_func, isok_func=isok_func)
-        uk_dict.update({i['fans_uk']:i for i in ret.get('fans_list', [])})
+        uk_dict.update({i['fans_uk']:i for i in ret.get('fans_list', [])} if isok_func(ret) else {})
         total_count -= 24
     return uk_dict
 
@@ -264,7 +258,7 @@ def main():
     proxy_list = getattr(get_proxy_info, 'proxy_list', [])
     _LOG('proxy ip:%d' % (len(proxy_list),))
 
-    spawn_num = 20
+    spawn_num = 50
     min_count = 10
     try:
         while 1:
